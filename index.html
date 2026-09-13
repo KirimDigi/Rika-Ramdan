@@ -7102,7 +7102,9 @@
 				});
 			}
 
-			var LS_KEY = 'ucapan_lokal_v1';
+			var LS_KEY = 'ucapan_lokal_v2';
+			// sekali saja: buang cache v1 yang berisi data test yang sudah dihapus dari spreadsheet
+			try { localStorage.removeItem('ucapan_lokal_v1'); } catch (e) { }
 			function getLocal() {
 				try {
 					var a = JSON.parse(localStorage.getItem(LS_KEY) || '[]');
@@ -7113,6 +7115,31 @@
 				try {
 					var a = getLocal();
 					a.unshift(item);
+					localStorage.setItem(LS_KEY, JSON.stringify(a.slice(0, 50)));
+				} catch (e) { }
+			}
+			function localKey(it) { return (it.nama || '') + '|' + (it.ucapan || ''); }
+			function removeLocal(item) {
+				try {
+					var k = localKey(item);
+					var a = getLocal().filter(function (x) { return localKey(x) !== k; });
+					localStorage.setItem(LS_KEY, JSON.stringify(a.slice(0, 50)));
+				} catch (e) { }
+			}
+			// hapus dari lokal semua yang sudah ada di server + yang umurnya > 3 hari,
+			// agar hapusan di spreadsheet benar-benar hilang dan tidak jadi hantu
+			function pruneLocal(serverItems) {
+				try {
+					var s = {};
+					var i;
+					for (i = 0; i < (serverItems || []).length; i++) { s[localKey(serverItems[i])] = 1; }
+					var now = Date.now();
+					var a = getLocal().filter(function (x) {
+						if (s[localKey(x)]) return false;
+						var t = x && x.waktu ? Date.parse(x.waktu) : 0;
+						if (!isNaN(t) && t && (now - t) > 3 * 24 * 3600 * 1000) return false;
+						return true;
+					});
 					localStorage.setItem(LS_KEY, JSON.stringify(a.slice(0, 50)));
 				} catch (e) { }
 			}
@@ -7289,6 +7316,7 @@
 					sortNewest(items);
 					_serverItems = items;
 					_serverTotal = (data && data.total != null) ? Number(data.total) : items.length;
+					pruneLocal(items);
 					renderCombined(_currentPage);
 					return;
 				}
@@ -7377,6 +7405,8 @@
 					_sending = false;
 					if (submitBtn) submitBtn.disabled = false;
 					if (data && (data.ok || data.success || data.result === 'success')) {
+						// sudah masuk server, hapus dari outbox lokal agar ikut terhapus bila nanti dihapus di spreadsheet
+						removeLocal(item);
 						api(APPS_SCRIPT_URL + '?page=1&perPage=' + FETCH_ALL).then(renderUcapan);
 					}
 				});
