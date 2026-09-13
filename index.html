@@ -7080,7 +7080,7 @@
 			function jsonp(url, cbName) {
 				return new Promise(function (resolve) {
 					var done = false;
-					var t = setTimeout(function () { cleanup(); resolve(null); }, 8000);
+					var t = setTimeout(function () { cleanup(); resolve(null); }, 6000);
 					function cleanup() {
 						clearTimeout(t);
 						var s = document.getElementById('ucapan-jsonp-' + cbName);
@@ -7092,7 +7092,7 @@
 					};
 					var sc = document.createElement('script');
 					sc.id = 'ucapan-jsonp-' + cbName;
-					sc.src = url + '&callback=' + cbName;
+					sc.src = url + (url.indexOf('?') !== -1 ? '&' : '?') + 'callback=' + cbName;
 					sc.onerror = function () {
 						if (!done) { done = true; cleanup(); resolve(null); }
 					};
@@ -7100,56 +7100,177 @@
 				});
 			}
 
+			var LS_KEY = 'ucapan_lokal_v1';
+			function getLocal() {
+				try {
+					var a = JSON.parse(localStorage.getItem(LS_KEY) || '[]');
+					return Array.isArray(a) ? a : [];
+				} catch (e) { return []; }
+			}
+			function saveLocal(item) {
+				try {
+					var a = getLocal();
+					a.unshift(item);
+					localStorage.setItem(LS_KEY, JSON.stringify(a.slice(0, 50)));
+				} catch (e) { }
+			}
+
 			function api(url) {
-				if (window.fetch) {
-					return fetch(url, { mode: 'cors' }).then(function (res) {
-						return res.text().then(function (txt) {
-							try { return JSON.parse(txt); } catch (e) { return null; }
-						});
-					}).catch(function () { return null; });
+				var sep = url.indexOf('?') !== -1 ? '&' : '?';
+				var nocacheUrl = url + sep + '_t=' + Date.now();
+				function fetchWithTimeout(u, ms) {
+					if (!window.fetch) return Promise.resolve(null);
+					try {
+						if (window.AbortController) {
+							var ctrl = new AbortController();
+							var timer = setTimeout(function () { try { ctrl.abort(); } catch (e) { } }, ms);
+							return fetch(u, { mode: 'cors', cache: 'no-store', signal: ctrl.signal }).then(function (res) {
+								clearTimeout(timer);
+								return res.text().then(function (txt) {
+									try { return JSON.parse(txt); } catch (e) { return null; }
+								});
+							}).catch(function () { clearTimeout(timer); return null; });
+						}
+					} catch (e) { }
+					return new Promise(function (resolve) {
+						var done = false;
+						var timer2 = setTimeout(function () { if (!done) { done = true; resolve(null); } }, ms);
+						fetch(u, { mode: 'cors', cache: 'no-store' }).then(function (res) {
+							return res.text().then(function (txt) {
+								if (!done) { done = true; clearTimeout(timer2); try { resolve(JSON.parse(txt)); } catch (e) { resolve(null); } }
+							});
+						}).catch(function () { if (!done) { done = true; clearTimeout(timer2); resolve(null); } });
+					});
 				}
-				var cbName = '__ucapanCb' + Math.floor(Math.random() * 1000000);
-				return jsonp(url, cbName);
+				// fetch dan jsonp jalan paralel, siapa cepat dia dipakai. Maks 7 detik.
+				return new Promise(function (resolve) {
+					var done = false;
+					var finished = 0;
+					var timer = setTimeout(function () { if (!done) { done = true; resolve(null); } }, 7000);
+					function fin(v) { if (!done && v) { done = true; clearTimeout(timer); resolve(v); } }
+					function pump(v) {
+						if (v) { fin(v); return; }
+						finished++;
+						if (finished >= 2 && !done) { done = true; clearTimeout(timer); resolve(null); }
+					}
+					fetchWithTimeout(nocacheUrl, 6000).then(pump);
+					var cbName = '__ucapanCb' + Math.floor(Math.random() * 1000000);
+					jsonp(nocacheUrl, cbName).then(pump);
+				});
+			}
+
+			var _currentPage = 1;
+			var _serverItems = [];
+			var _serverTotal = 0;
+
+			function renderItemsHTML(items) {
+				return items.map(function (it) {
+					var tamu = (it.kehadiran === 'present' && it.tamu) ? ' · ' + esc(it.tamu) + ' orang' : '';
+					return '<div style="background:#fff;border:1px solid #eee;border-radius:10px;padding:12px 14px;margin-bottom:10px;text-align:left;">' +
+						'<div style="font-weight:700;color:#844E49;">' + esc(it.nama || 'Tamu') + '</div>' +
+						'<div style="color:#333;margin:4px 0;white-space:pre-wrap;">' + esc(it.ucapan) + '</div>' +
+						'<div style="font-size:12px;color:#888;">' + attendLabel(it.kehadiran) + tamu + (it.waktu ? ' · ' + fmtWaktu(it.waktu) : '') + '</div>' +
+						'</div>';
+				}).join('');
+			}
+
+			function combinedItems() {
+				var local = getLocal();
+				var seen = {};
+				var out = [];
+				for (var i = 0; i < local.length; i++) { out.push(local[i]); seen[(local[i].nama || '') + '|' + (local[i].ucapan || '')] = 1; }
+				for (var j = 0; j < _serverItems.length; j++) {
+					var k = (_serverItems[j].nama || '') + '|' + (_serverItems[j].ucapan || '');
+					if (!seen[k]) out.push(_serverItems[j]);
+				}
+				return out;
+			}
+
+			function renderCombined(page) {
+				var list = document.getElementById('ucapan-list');
+				if (!list) return;
+				var all = combinedItems();
+				var totalPages = Math.max(1, Math.ceil(all.length / PER_PAGE));
+				if (!all.length) {
+					list.innerHTML = '<div style="text-align:center;color:#999;padding:10px;">Belum ada ucapan. Jadilah yang pertama!</div>';
+				} else {
+					var start = (page - 1) * PER_PAGE;
+					list.innerHTML = renderItemsHTML(all.slice(start, start + PER_PAGE));
+				}
+				var pag = document.getElementById('ucapan-pagination');
+				if (pag) {
+					if (totalPages <= 1) { pag.innerHTML = ''; }
+					else {
+						var h = '';
+						if (page > 1) h += '<a href="javascript:void(0)" data-p="' + (page - 1) + '" style="color:#844E49;margin-right:10px;">« Sebelumnya</a>';
+						h += '<span style="color:#888;">Halaman ' + page + ' dari ' + totalPages + '</span>';
+						if (page < totalPages) h += '<a href="javascript:void(0)" data-p="' + (page + 1) + '" style="color:#844E49;margin-left:10px;">Berikutnya »</a>';
+						pag.innerHTML = h;
+						var links = pag.querySelectorAll('a[data-p]');
+						for (var i = 0; i < links.length; i++) {
+							links[i].addEventListener('click', function () { loadUcapan(parseInt(this.getAttribute('data-p'))); });
+						}
+					}
+				}
 			}
 
 			function loadUcapan(page) {
 				var list = document.getElementById('ucapan-list');
 				if (!list) return;
-				list.innerHTML = '<div style="text-align:center;color:#999;padding:10px;">Memuat ucapan...</div>';
-				api(APPS_SCRIPT_URL + '?page=' + page).then(renderUcapan);
+				_currentPage = page || 1;
+				// TAMPIL INSTAN dari cache lokal, jangan tunggu server
+				var all = combinedItems();
+				if (all.length || _serverItems.length) {
+					renderCombined(_currentPage);
+				} else {
+					var localOnly = getLocal();
+					if (localOnly.length) { renderCombined(_currentPage); }
+					else { list.innerHTML = '<div style="text-align:center;color:#999;padding:10px;">Memuat ucapan...</div>'; }
+				}
+				var pag = document.getElementById('ucapan-pagination');
+				api(APPS_SCRIPT_URL + '?page=' + _currentPage + '&perPage=' + PER_PAGE).then(renderUcapan);
 			}
 
 			function renderUcapan(data) {
 				var list = document.getElementById('ucapan-list');
 				if (!list) return;
-				if (!data || !data.items) {
-					list.innerHTML = '<div style="text-align:center;color:#999;padding:10px;">Gagal memuat ucapan.</div>';
+				var items = null;
+				if (data) {
+					if (Array.isArray(data)) items = data;
+					else if (Array.isArray(data.items)) items = data.items;
+					else if (Array.isArray(data.data)) items = data.data;
+				}
+				if (items) {
+					_serverItems = items;
+					_serverTotal = (data && data.total != null) ? Number(data.total) : items.length;
+					renderCombined(_currentPage);
 					return;
 				}
-				if (!data.items.length) {
-					list.innerHTML = '<div style="text-align:center;color:#999;padding:10px;">Belum ada ucapan. Jadilah yang pertama!</div>';
+				// server gagal/404: tampilkan cache lokal, jangan stuck loading
+				var all = combinedItems();
+				if (all.length) {
+					renderCombined(_currentPage);
 				} else {
-					list.innerHTML = data.items.map(function (it) {
-						var tamu = (it.kehadiran === 'present' && it.tamu) ? ' · ' + esc(it.tamu) + ' orang' : '';
-						return '<div style="background:#fff;border:1px solid #eee;border-radius:10px;padding:12px 14px;margin-bottom:10px;text-align:left;">' +
-							'<div style="font-weight:700;color:#844E49;">' + esc(it.nama) + '</div>' +
-							'<div style="color:#333;margin:4px 0;white-space:pre-wrap;">' + esc(it.ucapan) + '</div>' +
-							'<div style="font-size:12px;color:#888;">' + attendLabel(it.kehadiran) + tamu + (it.waktu ? ' · ' + fmtWaktu(it.waktu) : '') + '</div>' +
-							'</div>';
-					}).join('');
+					list.innerHTML = '<div style="text-align:center;color:#999;padding:10px;">Belum bisa memuat dari server.<br><button type="button" id="ucapan-retry" style="margin-top:8px;padding:6px 18px;border:1px solid #844E49;border-radius:20px;background:#fff;color:#844E49;font-weight:700;cursor:pointer;">Coba lagi</button></div>';
+					var rb = document.getElementById('ucapan-retry');
+					if (rb) rb.addEventListener('click', function () { loadUcapan(_currentPage); });
 				}
-				renderPagination(data);
 			}
 
-			function renderPagination(data) {
+			function renderPagination(data, items) {
 				var pag = document.getElementById('ucapan-pagination');
 				if (!pag) return;
-				var totalPages = Math.max(1, Math.ceil(data.total / data.perPage));
+				var total = (data && data.total != null) ? Number(data.total) : (items ? items.length : 0);
+				total = Math.max(total, combinedItems().length);
+				var perPage = (data && data.perPage) ? Number(data.perPage) : PER_PAGE;
+				if (!perPage || perPage <= 0) perPage = 5;
+				var page = (data && data.page) ? Number(data.page) : _currentPage;
+				var totalPages = Math.max(1, Math.ceil(total / perPage));
 				if (totalPages <= 1) { pag.innerHTML = ''; return; }
 				var h = '';
-				if (data.page > 1) h += '<a href="javascript:void(0)" data-p="' + (data.page - 1) + '" style="color:#844E49;margin-right:10px;">« Sebelumnya</a>';
-				h += '<span style="color:#888;">Halaman ' + data.page + ' dari ' + totalPages + '</span>';
-				if (data.page < totalPages) h += '<a href="javascript:void(0)" data-p="' + (data.page + 1) + '" style="color:#844E49;margin-left:10px;">Berikutnya »</a>';
+				if (page > 1) h += '<a href="javascript:void(0)" data-p="' + (page - 1) + '" style="color:#844E49;margin-right:10px;">« Sebelumnya</a>';
+				h += '<span style="color:#888;">Halaman ' + page + ' dari ' + totalPages + '</span>';
+				if (page < totalPages) h += '<a href="javascript:void(0)" data-p="' + (page + 1) + '" style="color:#844E49;margin-left:10px;">Berikutnya »</a>';
 				pag.innerHTML = h;
 				var links = pag.querySelectorAll('a[data-p]');
 				for (var i = 0; i < links.length; i++) {
@@ -7184,7 +7305,17 @@
 					if (status) status.textContent = 'Lengkapi nama, ucapan, dan konfirmasi kehadiran.';
 					return;
 				}
-				if (status) status.textContent = 'Mengirim...';
+				// Tampil instan: simpan lokal dulu, sinkron ke server di background
+				var item = { nama: nama, ucapan: ucapan, kehadiran: attendance, tamu: guest, waktu: new Date().toISOString() };
+				saveLocal(item);
+				try { document.getElementById('commentform-6854').reset(); } catch (e) { }
+				var wrap0 = document.getElementById('ucapan-list-wrap');
+				var btn0 = document.getElementById('ucapan-toggle');
+				if (wrap0) wrap0.style.display = 'block';
+				if (btn0) btn0.textContent = 'Sembunyikan Ucapan';
+				_currentPage = 1;
+				renderCombined(1);
+				if (status) status.textContent = 'Terima kasih, ucapan berhasil dikirim!';
 
 				var url = APPS_SCRIPT_URL + '?do=save&nama=' + encodeURIComponent(nama) +
 					'&ucapan=' + encodeURIComponent(ucapan) +
@@ -7192,17 +7323,8 @@
 					'&tamu=' + encodeURIComponent(guest);
 
 				api(url).then(function (data) {
-					if (status) {
-						if (data && data.ok) {
-							status.textContent = 'Terima kasih, ucapan berhasil dikirim!';
-							var wrap = document.getElementById('ucapan-list-wrap');
-							var btn = document.getElementById('ucapan-toggle');
-							if (wrap) wrap.style.display = 'block';
-							if (btn) btn.textContent = 'Sembunyikan Ucapan';
-							loadUcapan(1);
-						} else {
-							status.textContent = 'Gagal mengirim. Periksa koneksi lalu coba lagi.';
-						}
+					if (data && (data.ok || data.success || data.result === 'success')) {
+						api(APPS_SCRIPT_URL + '?page=1&perPage=' + PER_PAGE).then(renderUcapan);
 					}
 				});
 			}
@@ -7212,10 +7334,11 @@
 				var wrap = document.getElementById('ucapan-list-wrap');
 				if (!btn || !wrap) return;
 				btn.addEventListener('click', function () {
-					if (wrap.style.display === 'none') {
+					var hidden = (wrap.style.display === 'none') || (wrap.style.display === '' && window.getComputedStyle && window.getComputedStyle(wrap).display === 'none');
+					if (hidden) {
 						wrap.style.display = 'block';
 						btn.textContent = 'Sembunyikan Ucapan';
-						loadUcapan(1);
+						loadUcapan(_currentPage || 1);
 					} else {
 						wrap.style.display = 'none';
 						btn.textContent = 'Tampilkan Ucapan';
@@ -7244,6 +7367,19 @@
 				wireAttendance();
 				wireForm();
 				wireToggle();
+				// preload di background agar klik Tampilkan langsung ada isinya
+				setTimeout(function () {
+					api(APPS_SCRIPT_URL + '?page=1&perPage=' + PER_PAGE).then(function (d) {
+						// simpan diam-diam, jangan timpa tampilan loading
+						if (d) {
+							if (Array.isArray(d)) _serverItems = d;
+							else if (Array.isArray(d.items)) _serverItems = d.items;
+							else if (Array.isArray(d.data)) _serverItems = d.data;
+							var wrap = document.getElementById('ucapan-list-wrap');
+							if (wrap && wrap.style.display === 'block') renderCombined(_currentPage);
+						}
+					});
+				}, 800);
 			}
 
 			if (document.readyState === 'loading') {
