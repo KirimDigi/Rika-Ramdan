@@ -7054,9 +7054,8 @@
 	</script>
 	<script>
 		(function () {
-			var APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzP1wbXDLu81LG2PmAgmAGk8KxoRUMrBoWf2IP-eGF1imCjvDXy9y_-4VcdbjWSKvHhug/exec";
+			var APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzXmwb93Cb81VmKreQMZcgiOIoUZ2yHnyvbM-A5yT_K8MH__HvGnvDQybRf3UBcueTavA/exec";
 			var PER_PAGE = 5;
-			var FETCH_ALL = 500;
 
 			function esc(s) {
 				var d = document.createElement('div');
@@ -7082,7 +7081,7 @@
 			function jsonp(url, cbName) {
 				return new Promise(function (resolve) {
 					var done = false;
-					var t = setTimeout(function () { cleanup(); resolve(null); }, 6000);
+					var t = setTimeout(function () { cleanup(); resolve(null); }, 15000);
 					function cleanup() {
 						clearTimeout(t);
 						var s = document.getElementById('ucapan-jsonp-' + cbName);
@@ -7143,6 +7142,21 @@
 					localStorage.setItem(LS_KEY, JSON.stringify(a.slice(0, 50)));
 				} catch (e) { }
 			}
+			// snapshot terakhir dari server: kalau server lagi ngadat, tampilkan data
+			// terakhir yang berhasil dimuat daripada error kosong
+			var CACHE_KEY = 'ucapan_server_v1';
+			function saveServerCache(items, total) {
+				try {
+					localStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), items: (items || []).slice(0, 30), total: total || 0 }));
+				} catch (e) { }
+			}
+			function getServerCache() {
+				try {
+					var c = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
+					if (c && Array.isArray(c.items) && c.items.length) return c;
+				} catch (e) { }
+				return null;
+			}
 
 			function fetchWithTimeout(u, ms) {
 				if (!window.fetch) return Promise.resolve(null);
@@ -7171,18 +7185,19 @@
 			function api(url) {
 				var sep = url.indexOf('?') !== -1 ? '&' : '?';
 				var nocacheUrl = url + sep + '_t=' + Date.now();
-				// fetch dan jsonp jalan paralel, siapa cepat dia dipakai. Maks 7 detik.
+				// fetch dan jsonp jalan paralel, siapa cepat dia dipakai. Maks 16 detik
+				// (Apps Script sering cold start / lambat).
 				return new Promise(function (resolve) {
 					var done = false;
 					var finished = 0;
-					var timer = setTimeout(function () { if (!done) { done = true; resolve(null); } }, 7000);
+					var timer = setTimeout(function () { if (!done) { done = true; resolve(null); } }, 16000);
 					function fin(v) { if (!done && v) { done = true; clearTimeout(timer); resolve(v); } }
 					function pump(v) {
 						if (v) { fin(v); return; }
 						finished++;
 						if (finished >= 2 && !done) { done = true; clearTimeout(timer); resolve(null); }
 					}
-					fetchWithTimeout(nocacheUrl, 6000).then(pump);
+					fetchWithTimeout(nocacheUrl, 14000).then(pump);
 					var cbName = '__ucapanCb' + Math.floor(Math.random() * 1000000);
 					jsonp(nocacheUrl, cbName).then(pump);
 				});
@@ -7193,7 +7208,7 @@
 			function apiSave(url) {
 				var sep = url.indexOf('?') !== -1 ? '&' : '?';
 				var nocacheUrl = url + sep + '_t=' + Date.now();
-				return fetchWithTimeout(nocacheUrl, 8000).then(function (d) {
+				return fetchWithTimeout(nocacheUrl, 15000).then(function (d) {
 					if (d) return d;
 					var cbName = '__saveCb' + Math.floor(Math.random() * 1000000);
 					return jsonp(nocacheUrl, cbName);
@@ -7253,12 +7268,27 @@
 					var k = (_serverItems[i].nama || '') + '|' + (_serverItems[i].ucapan || '');
 					if (!seen[k]) serverFiltered.push(_serverItems[i]);
 				}
-				// gabung lalu urutkan: terbaru paling atas
-				var all = sortNewest(local.concat(serverFiltered));
-				var total = Math.max(all.length, _serverTotal + local.length);
-				if (!_serverTotal) total = all.length;
-				var start = (page - 1) * PER_PAGE;
-				var toShow = all.slice(start, start + PER_PAGE);
+				// gabung lokal (outbox) + server
+				var allLocal = local.concat(serverFiltered);
+				var toShow;
+				var total;
+				if (_serverTotal > _serverItems.length) {
+					// SERVER PAGINATED: server hanya kirim 1 halaman (5 item),
+					// jadi JANGAN slice lagi. Halaman 1 = lokal + server,
+					// halaman 2+ = data server halaman itu apa adanya.
+					if (page === 1) {
+						toShow = sortNewest(allLocal).slice(0, PER_PAGE);
+					} else {
+						toShow = sortNewest(serverFiltered);
+					}
+					total = _serverTotal + local.length;
+				} else {
+					// semua data sudah di tangan: urutkan terbaru di atas lalu slice
+					var all = sortNewest(allLocal);
+					total = all.length;
+					var start = (page - 1) * PER_PAGE;
+					toShow = all.slice(start, start + PER_PAGE);
+				}
 				var totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
 				if (!toShow.length) {
 					if (total === 0) {
@@ -7290,17 +7320,18 @@
 				var list = document.getElementById('ucapan-list');
 				if (!list) return;
 				_currentPage = page || 1;
-				// kalau cache semua-data sudah ada, pindah halaman instan tanpa loading
-				if (_serverItems.length || getLocal().length) {
-					renderCombined(_currentPage);
-					// halaman 1 ikut refresh diam-diam agar data terbaru masuk
-					if (_currentPage === 1) {
-						api(APPS_SCRIPT_URL + '?page=1&perPage=' + FETCH_ALL).then(renderUcapan);
-					}
-					return;
-				}
+				// server paginasi per halaman, jadi tiap pindah halaman wajib fetch halaman itu.
+				// server kadang cold start / lambat, jadi coba sampai 3x otomatis.
 				list.innerHTML = '<div style="text-align:center;color:#999;padding:10px;">Memuat ucapan...</div>';
-				api(APPS_SCRIPT_URL + '?page=1&perPage=' + FETCH_ALL).then(renderUcapan);
+				fetchPageRetry(_currentPage, 3);
+			}
+
+			function fetchPageRetry(page, triesLeft) {
+				api(APPS_SCRIPT_URL + '?page=' + page + '&perPage=' + PER_PAGE).then(function (d) {
+					if (d) { renderUcapan(d); return; }
+					if (triesLeft > 1) { fetchPageRetry(page, triesLeft - 1); return; }
+					renderUcapan(null);
+				});
 			}
 
 			function renderUcapan(data) {
@@ -7317,10 +7348,19 @@
 					_serverItems = items;
 					_serverTotal = (data && data.total != null) ? Number(data.total) : items.length;
 					pruneLocal(items);
+					saveServerCache(items, _serverTotal);
 					renderCombined(_currentPage);
 					return;
 				}
-				// server gagal/404: tampilkan cache lokal, jangan stuck loading
+				// server gagal setelah 3x coba: pakai snapshot terakhir bila ada,
+				// lalu cache lokal, terakhir baru tampilkan error + tombol coba lagi
+				var snap = getServerCache();
+				if (snap && (!_serverItems.length)) {
+					_serverItems = snap.items;
+					_serverTotal = snap.total || snap.items.length;
+					renderCombined(_currentPage);
+					return;
+				}
 				var all = combinedItems();
 				if (all.length) {
 					renderCombined(_currentPage);
@@ -7407,7 +7447,7 @@
 					if (data && (data.ok || data.success || data.result === 'success')) {
 						// sudah masuk server, hapus dari outbox lokal agar ikut terhapus bila nanti dihapus di spreadsheet
 						removeLocal(item);
-						api(APPS_SCRIPT_URL + '?page=1&perPage=' + FETCH_ALL).then(renderUcapan);
+						api(APPS_SCRIPT_URL + '?page=1&perPage=' + PER_PAGE).then(renderUcapan);
 					}
 				});
 			}
