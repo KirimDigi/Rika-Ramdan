@@ -19,7 +19,7 @@ function getComments_SAIC(post_id, num_comments, num_get_comments, order_comment
             status.removeClass("saic-loading").html("").hide(), $container_comments.html(data), $container_comments.show(), jPages_SAIC(post_id, WDS_RSVP.jPagesNum)
         },
         error: function(jqXHR, textStatus, errorThrown) {
-            clog("ajax error"), clog("jqXHR"), clog(jqXHR), clog("errorThrown"), clog(errorThrown)
+            status.removeClass("saic-loading").html("").hide(), clog("ajax error"), clog("jqXHR"), clog(jqXHR), clog("errorThrown"), clog(errorThrown)
         },
         complete: function(jqXHR, textStatus) {}
     }), !1

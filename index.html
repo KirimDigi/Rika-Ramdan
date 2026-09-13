@@ -4284,7 +4284,7 @@
 
 															<a href="index-1.htm?post_id=6854&#038;comments=32&#038;get=500&#038;order=DESC"
 																id="saic-link-6854"
-																class="saic-link saic-icon-link saic-icon-link-true auto-load-true">
+																class="saic-link saic-icon-link saic-icon-link-true">
 																<i class="saico-comment"></i>
 																<span>32</span>
 																Ucapan </a>
@@ -4417,12 +4417,13 @@
 																			</div>
 
 																		</form>
+																		<style>#saic-comment-status-6854,#saic-container-comment-6854,.saic-holder-6854{display:none !important;}</style>
 																		<button type="button" id="ucapan-toggle"
 																			style="display:block;margin:18px auto 0;padding:10px 26px;border:1px solid #844E49;border-radius:30px;background:#fff;color:#844E49;font-weight:700;font-size:14px;cursor:pointer;font-family:inherit;">
-																			Tampilkan Ucapan</button>
+																			Sembunyikan Ucapan</button>
 																		<div id="ucapan-list-wrap"
-																			style="display:none;margin-top:20px;">
-																			<div id="ucapan-list"></div>
+																			style="display:block;margin-top:20px;">
+																			<div id="ucapan-list"><div style="text-align:center;color:#999;padding:10px;">Memuat ucapan...</div></div>
 																			<div id="ucapan-pagination"
 																				style="text-align:center;margin:12px 0;">
 																			</div>
@@ -4438,13 +4439,13 @@
 															</div>
 
 															<div id="saic-comment-status-6854"
-																class="saic-comment-status"></div>
+																class="saic-comment-status" style="display:none"></div>
 
 															<ul id="saic-container-comment-6854"
 																class="saic-container-comments saic-order-DESC saic-has-32-comments saic-multiple-comments"
-																data-order="DESC"></ul>
+																data-order="DESC" style="display:none"></ul>
 
-															<div class="saic-holder-6854 saic-holder"></div>
+															<div class="saic-holder-6854 saic-holder" style="display:none"></div>
 
 														</div>
 
@@ -7055,6 +7056,7 @@
 		(function () {
 			var APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzP1wbXDLu81LG2PmAgmAGk8KxoRUMrBoWf2IP-eGF1imCjvDXy9y_-4VcdbjWSKvHhug/exec";
 			var PER_PAGE = 5;
+			var FETCH_ALL = 500;
 
 			function esc(s) {
 				var d = document.createElement('div');
@@ -7198,16 +7200,47 @@
 				return out;
 			}
 
+			function sortNewest(arr) {
+				// terbaru paling atas, tanpa waktu dianggap paling lama
+				arr.sort(function (a, b) {
+					var ta = a && a.waktu ? Date.parse(a.waktu) : 0;
+					var tb = b && b.waktu ? Date.parse(b.waktu) : 0;
+					if (isNaN(ta)) ta = 0;
+					if (isNaN(tb)) tb = 0;
+					return tb - ta;
+				});
+				return arr;
+			}
+
 			function renderCombined(page) {
 				var list = document.getElementById('ucapan-list');
 				if (!list) return;
-				var all = combinedItems();
-				var totalPages = Math.max(1, Math.ceil(all.length / PER_PAGE));
-				if (!all.length) {
-					list.innerHTML = '<div style="text-align:center;color:#999;padding:10px;">Belum ada ucapan. Jadilah yang pertama!</div>';
+				page = page || 1;
+				var local = getLocal();
+				// deduplikasi lokal vs server
+				var seen = {};
+				var i;
+				for (i = 0; i < local.length; i++) { seen[(local[i].nama || '') + '|' + (local[i].ucapan || '')] = 1; }
+				var serverFiltered = [];
+				for (i = 0; i < _serverItems.length; i++) {
+					var k = (_serverItems[i].nama || '') + '|' + (_serverItems[i].ucapan || '');
+					if (!seen[k]) serverFiltered.push(_serverItems[i]);
+				}
+				// gabung lalu urutkan: terbaru paling atas
+				var all = sortNewest(local.concat(serverFiltered));
+				var total = Math.max(all.length, _serverTotal + local.length);
+				if (!_serverTotal) total = all.length;
+				var start = (page - 1) * PER_PAGE;
+				var toShow = all.slice(start, start + PER_PAGE);
+				var totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
+				if (!toShow.length) {
+					if (total === 0) {
+						list.innerHTML = '<div style="text-align:center;color:#999;padding:10px;">Belum ada ucapan. Jadilah yang pertama!</div>';
+					} else {
+						list.innerHTML = '<div style="text-align:center;color:#999;padding:10px;">Tidak ada data di halaman ini.</div>';
+					}
 				} else {
-					var start = (page - 1) * PER_PAGE;
-					list.innerHTML = renderItemsHTML(all.slice(start, start + PER_PAGE));
+					list.innerHTML = renderItemsHTML(toShow);
 				}
 				var pag = document.getElementById('ucapan-pagination');
 				if (pag) {
@@ -7219,8 +7252,8 @@
 						if (page < totalPages) h += '<a href="javascript:void(0)" data-p="' + (page + 1) + '" style="color:#844E49;margin-left:10px;">Berikutnya »</a>';
 						pag.innerHTML = h;
 						var links = pag.querySelectorAll('a[data-p]');
-						for (var i = 0; i < links.length; i++) {
-							links[i].addEventListener('click', function () { loadUcapan(parseInt(this.getAttribute('data-p'))); });
+						for (var j = 0; j < links.length; j++) {
+							links[j].addEventListener('click', function () { loadUcapan(parseInt(this.getAttribute('data-p'))); });
 						}
 					}
 				}
@@ -7230,17 +7263,17 @@
 				var list = document.getElementById('ucapan-list');
 				if (!list) return;
 				_currentPage = page || 1;
-				// TAMPIL INSTAN dari cache lokal, jangan tunggu server
-				var all = combinedItems();
-				if (all.length || _serverItems.length) {
+				// kalau cache semua-data sudah ada, pindah halaman instan tanpa loading
+				if (_serverItems.length || getLocal().length) {
 					renderCombined(_currentPage);
-				} else {
-					var localOnly = getLocal();
-					if (localOnly.length) { renderCombined(_currentPage); }
-					else { list.innerHTML = '<div style="text-align:center;color:#999;padding:10px;">Memuat ucapan...</div>'; }
+					// halaman 1 ikut refresh diam-diam agar data terbaru masuk
+					if (_currentPage === 1) {
+						api(APPS_SCRIPT_URL + '?page=1&perPage=' + FETCH_ALL).then(renderUcapan);
+					}
+					return;
 				}
-				var pag = document.getElementById('ucapan-pagination');
-				api(APPS_SCRIPT_URL + '?page=' + _currentPage + '&perPage=' + PER_PAGE).then(renderUcapan);
+				list.innerHTML = '<div style="text-align:center;color:#999;padding:10px;">Memuat ucapan...</div>';
+				api(APPS_SCRIPT_URL + '?page=1&perPage=' + FETCH_ALL).then(renderUcapan);
 			}
 
 			function renderUcapan(data) {
@@ -7253,6 +7286,7 @@
 					else if (Array.isArray(data.data)) items = data.data;
 				}
 				if (items) {
+					sortNewest(items);
 					_serverItems = items;
 					_serverTotal = (data && data.total != null) ? Number(data.total) : items.length;
 					renderCombined(_currentPage);
@@ -7343,7 +7377,7 @@
 					_sending = false;
 					if (submitBtn) submitBtn.disabled = false;
 					if (data && (data.ok || data.success || data.result === 'success')) {
-						api(APPS_SCRIPT_URL + '?page=1&perPage=' + PER_PAGE).then(renderUcapan);
+						api(APPS_SCRIPT_URL + '?page=1&perPage=' + FETCH_ALL).then(renderUcapan);
 					}
 				});
 			}
@@ -7386,19 +7420,19 @@
 				wireAttendance();
 				wireForm();
 				wireToggle();
-				// preload di background agar klik Tampilkan langsung ada isinya
-				setTimeout(function () {
-					api(APPS_SCRIPT_URL + '?page=1&perPage=' + PER_PAGE).then(function (d) {
-						// simpan diam-diam, jangan timpa tampilan loading
-						if (d) {
-							if (Array.isArray(d)) _serverItems = d;
-							else if (Array.isArray(d.items)) _serverItems = d.items;
-							else if (Array.isArray(d.data)) _serverItems = d.data;
-							var wrap = document.getElementById('ucapan-list-wrap');
-							if (wrap && wrap.style.display === 'block') renderCombined(_currentPage);
-						}
-					});
-				}, 800);
+				// kunci mati sistem lama agar spinner-nya tidak bisa muncul lagi
+				try {
+					window.getComments_SAIC = function () { return false; };
+					var oldIds = ['saic-comment-status-6854', 'saic-container-comment-6854'];
+					for (var k = 0; k < oldIds.length; k++) {
+						var el = document.getElementById(oldIds[k]);
+						if (el) { el.innerHTML = ''; el.style.display = 'none'; }
+					}
+					var holds = document.querySelectorAll ? document.querySelectorAll('.saic-holder-6854') : [];
+					for (var h = 0; h < holds.length; h++) { holds[h].style.display = 'none'; }
+				} catch (e) { }
+				// langsung tampil saat halaman dibuka, tanpa perlu klik
+				loadUcapan(1);
 			}
 
 			if (document.readyState === 'loading') {
