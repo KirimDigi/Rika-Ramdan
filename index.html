@@ -7142,17 +7142,18 @@
 					localStorage.setItem(LS_KEY, JSON.stringify(a.slice(0, 50)));
 				} catch (e) { }
 			}
-			// snapshot terakhir dari server: kalau server lagi ngadat, tampilkan data
-			// terakhir yang berhasil dimuat daripada error kosong
-			var CACHE_KEY = 'ucapan_server_v1';
-			function saveServerCache(items, total) {
+			// snapshot terakhir dari server PER HALAMAN: tampil instan dulu,
+			// refresh jalan di background. Jadi tidak ada lagi "Memuat..." lama
+			// kalau halaman itu pernah berhasil dimuat sebelumnya.
+			var CACHE_KEY = 'ucapan_server_v2';
+			function saveServerCache(page, items, total) {
 				try {
-					localStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), items: (items || []).slice(0, 30), total: total || 0 }));
+					localStorage.setItem(CACHE_KEY + '_p' + page, JSON.stringify({ t: Date.now(), items: (items || []).slice(0, 10), total: total || 0 }));
 				} catch (e) { }
 			}
-			function getServerCache() {
+			function getServerCache(page) {
 				try {
-					var c = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
+					var c = JSON.parse(localStorage.getItem(CACHE_KEY + '_p' + page) || 'null');
 					if (c && Array.isArray(c.items) && c.items.length) return c;
 				} catch (e) { }
 				return null;
@@ -7205,14 +7206,35 @@
 			// SAVE khusus: SINGLE request saja (jangan paralel, biar tidak double di spreadsheet).
 			// fetch dulu, kalau gagal baru jsonp. Ada kunci anti double-klik.
 			var _sending = false;
+			// SAVE: fetch saja dulu (tanpa fallback buta). Kalau hasilnya ambigu
+			// (timeout padahal baris mungkin sudah masuk), WAJIB verifikasi dulu
+			// lewat fetch halaman 1 sebelum kirim ulang — ini yang bikin dobel.
 			function apiSave(url) {
 				var sep = url.indexOf('?') !== -1 ? '&' : '?';
 				var nocacheUrl = url + sep + '_t=' + Date.now();
-				return fetchWithTimeout(nocacheUrl, 15000).then(function (d) {
-					if (d) return d;
-					var cbName = '__saveCb' + Math.floor(Math.random() * 1000000);
-					return jsonp(nocacheUrl, cbName);
-				});
+				return fetchWithTimeout(nocacheUrl, 15000);
+			}
+			function apiSaveJsonp(url) {
+				var sep = url.indexOf('?') !== -1 ? '&' : '?';
+				var nocacheUrl = url + sep + '_t=' + Date.now();
+				var cbName = '__saveCb' + Math.floor(Math.random() * 1000000);
+				return jsonp(nocacheUrl, cbName);
+			}
+			function isSaveOk(data) { return data && (data.ok || data.success || data.result === 'success'); }
+			function extractItems(data) {
+				if (!data) return null;
+				if (Array.isArray(data)) return data;
+				if (Array.isArray(data.items)) return data.items;
+				if (Array.isArray(data.data)) return data.data;
+				return null;
+			}
+			function serverHas(items, item) {
+				if (!items) return false;
+				var k = localKey(item);
+				for (var i = 0; i < items.length; i++) {
+					if (localKey(items[i]) === k) return true;
+				}
+				return false;
 			}
 
 			var _currentPage = 1;
@@ -7320,9 +7342,19 @@
 				var list = document.getElementById('ucapan-list');
 				if (!list) return;
 				_currentPage = page || 1;
-				// server paginasi per halaman, jadi tiap pindah halaman wajib fetch halaman itu.
-				// server kadang cold start / lambat, jadi coba sampai 3x otomatis.
-				list.innerHTML = '<div style="text-align:center;color:#999;padding:10px;">Memuat ucapan...</div>';
+				// tampil instan dari cache halaman ini bila ada, refresh tetap jalan di background
+				var snap = getServerCache(_currentPage);
+				if (snap) {
+					_serverItems = snap.items;
+					_serverTotal = snap.total || snap.items.length;
+					renderCombined(_currentPage);
+				} else if (_currentPage === 1 && getLocal().length) {
+					renderCombined(_currentPage);
+				} else {
+					// server paginasi per halaman, jadi tiap pindah halaman wajib fetch halaman itu.
+					// server kadang cold start / lambat, jadi coba sampai 3x otomatis.
+					list.innerHTML = '<div style="text-align:center;color:#999;padding:10px;">Memuat ucapan...</div>';
+				}
 				fetchPageRetry(_currentPage, 3);
 			}
 
@@ -7348,13 +7380,13 @@
 					_serverItems = items;
 					_serverTotal = (data && data.total != null) ? Number(data.total) : items.length;
 					pruneLocal(items);
-					saveServerCache(items, _serverTotal);
+					saveServerCache(_currentPage, items, _serverTotal);
 					renderCombined(_currentPage);
 					return;
 				}
-				// server gagal setelah 3x coba: pakai snapshot terakhir bila ada,
+				// server gagal setelah 3x coba: pakai snapshot halaman ini bila ada,
 				// lalu cache lokal, terakhir baru tampilkan error + tombol coba lagi
-				var snap = getServerCache();
+				var snap = getServerCache(_currentPage);
 				if (snap && (!_serverItems.length)) {
 					_serverItems = snap.items;
 					_serverTotal = snap.total || snap.items.length;
@@ -7433,7 +7465,7 @@
 				if (btn0) btn0.textContent = 'Sembunyikan Ucapan';
 				_currentPage = 1;
 				renderCombined(1);
-				if (status) status.textContent = 'Terima kasih, ucapan berhasil dikirim!';
+				if (status) status.textContent = 'Mengirim ucapan...';
 
 				var url = APPS_SCRIPT_URL + '?do=save&nama=' + encodeURIComponent(nama) +
 					'&ucapan=' + encodeURIComponent(ucapan) +
@@ -7441,14 +7473,32 @@
 					'&tamu=' + encodeURIComponent(guest) +
 					'&uid=' + Date.now() + Math.floor(Math.random() * 100000);
 
-				apiSave(url).then(function (data) {
+				function saveDone() {
 					_sending = false;
 					if (submitBtn) submitBtn.disabled = false;
-					if (data && (data.ok || data.success || data.result === 'success')) {
-						// sudah masuk server, hapus dari outbox lokal agar ikut terhapus bila nanti dihapus di spreadsheet
-						removeLocal(item);
-						api(APPS_SCRIPT_URL + '?page=1&perPage=' + PER_PAGE).then(renderUcapan);
-					}
+					// sudah masuk server, hapus dari outbox lokal agar ikut terhapus bila nanti dihapus di spreadsheet
+					removeLocal(item);
+					if (status) status.textContent = 'Terima kasih, ucapan berhasil dikirim!';
+					api(APPS_SCRIPT_URL + '?page=1&perPage=' + PER_PAGE).then(renderUcapan);
+				}
+				function savePending() {
+					_sending = false;
+					if (submitBtn) submitBtn.disabled = false;
+					if (status) status.textContent = 'Koneksi lambat — ucapan tersimpan di perangkat ini.';
+				}
+				apiSave(url).then(function (data) {
+					if (isSaveOk(data)) { saveDone(); return; }
+					// hasil ambigu: cek dulu apakah barisnya sudah masuk sebelum kirim ulang
+					api(APPS_SCRIPT_URL + '?page=1&perPage=' + PER_PAGE).then(function (d) {
+						if (serverHas(extractItems(d), item)) { saveDone(); return; }
+						apiSaveJsonp(url).then(function (d2) {
+							if (isSaveOk(d2)) { saveDone(); return; }
+							api(APPS_SCRIPT_URL + '?page=1&perPage=' + PER_PAGE).then(function (d3) {
+								if (serverHas(extractItems(d3), item)) { saveDone(); return; }
+								savePending();
+							});
+						});
+					});
 				});
 			}
 
