@@ -7115,33 +7115,33 @@
 				} catch (e) { }
 			}
 
+			function fetchWithTimeout(u, ms) {
+				if (!window.fetch) return Promise.resolve(null);
+				try {
+					if (window.AbortController) {
+						var ctrl = new AbortController();
+						var timer = setTimeout(function () { try { ctrl.abort(); } catch (e) { } }, ms);
+						return fetch(u, { mode: 'cors', cache: 'no-store', signal: ctrl.signal }).then(function (res) {
+							clearTimeout(timer);
+							return res.text().then(function (txt) {
+								try { return JSON.parse(txt); } catch (e) { return null; }
+							});
+						}).catch(function () { clearTimeout(timer); return null; });
+					}
+				} catch (e) { }
+				return new Promise(function (resolve) {
+					var done = false;
+					var timer2 = setTimeout(function () { if (!done) { done = true; resolve(null); } }, ms);
+					fetch(u, { mode: 'cors', cache: 'no-store' }).then(function (res) {
+						return res.text().then(function (txt) {
+							if (!done) { done = true; clearTimeout(timer2); try { resolve(JSON.parse(txt)); } catch (e) { resolve(null); } }
+						});
+					}).catch(function () { if (!done) { done = true; clearTimeout(timer2); resolve(null); } });
+				});
+			}
 			function api(url) {
 				var sep = url.indexOf('?') !== -1 ? '&' : '?';
 				var nocacheUrl = url + sep + '_t=' + Date.now();
-				function fetchWithTimeout(u, ms) {
-					if (!window.fetch) return Promise.resolve(null);
-					try {
-						if (window.AbortController) {
-							var ctrl = new AbortController();
-							var timer = setTimeout(function () { try { ctrl.abort(); } catch (e) { } }, ms);
-							return fetch(u, { mode: 'cors', cache: 'no-store', signal: ctrl.signal }).then(function (res) {
-								clearTimeout(timer);
-								return res.text().then(function (txt) {
-									try { return JSON.parse(txt); } catch (e) { return null; }
-								});
-							}).catch(function () { clearTimeout(timer); return null; });
-						}
-					} catch (e) { }
-					return new Promise(function (resolve) {
-						var done = false;
-						var timer2 = setTimeout(function () { if (!done) { done = true; resolve(null); } }, ms);
-						fetch(u, { mode: 'cors', cache: 'no-store' }).then(function (res) {
-							return res.text().then(function (txt) {
-								if (!done) { done = true; clearTimeout(timer2); try { resolve(JSON.parse(txt)); } catch (e) { resolve(null); } }
-							});
-						}).catch(function () { if (!done) { done = true; clearTimeout(timer2); resolve(null); } });
-					});
-				}
 				// fetch dan jsonp jalan paralel, siapa cepat dia dipakai. Maks 7 detik.
 				return new Promise(function (resolve) {
 					var done = false;
@@ -7156,6 +7156,18 @@
 					fetchWithTimeout(nocacheUrl, 6000).then(pump);
 					var cbName = '__ucapanCb' + Math.floor(Math.random() * 1000000);
 					jsonp(nocacheUrl, cbName).then(pump);
+				});
+			}
+			// SAVE khusus: SINGLE request saja (jangan paralel, biar tidak double di spreadsheet).
+			// fetch dulu, kalau gagal baru jsonp. Ada kunci anti double-klik.
+			var _sending = false;
+			function apiSave(url) {
+				var sep = url.indexOf('?') !== -1 ? '&' : '?';
+				var nocacheUrl = url + sep + '_t=' + Date.now();
+				return fetchWithTimeout(nocacheUrl, 8000).then(function (d) {
+					if (d) return d;
+					var cbName = '__saveCb' + Math.floor(Math.random() * 1000000);
+					return jsonp(nocacheUrl, cbName);
 				});
 			}
 
@@ -7305,7 +7317,11 @@
 					if (status) status.textContent = 'Lengkapi nama, ucapan, dan konfirmasi kehadiran.';
 					return;
 				}
-				// Tampil instan: simpan lokal dulu, sinkron ke server di background
+				if (_sending) return;
+				_sending = true;
+				var submitBtn = document.getElementById('submit-6854');
+				if (submitBtn) submitBtn.disabled = true;
+				// Tampil instan: simpan lokal dulu, sinkron ke server di background (sekali saja)
 				var item = { nama: nama, ucapan: ucapan, kehadiran: attendance, tamu: guest, waktu: new Date().toISOString() };
 				saveLocal(item);
 				try { document.getElementById('commentform-6854').reset(); } catch (e) { }
@@ -7320,9 +7336,12 @@
 				var url = APPS_SCRIPT_URL + '?do=save&nama=' + encodeURIComponent(nama) +
 					'&ucapan=' + encodeURIComponent(ucapan) +
 					'&kehadiran=' + encodeURIComponent(attendance) +
-					'&tamu=' + encodeURIComponent(guest);
+					'&tamu=' + encodeURIComponent(guest) +
+					'&uid=' + Date.now() + Math.floor(Math.random() * 100000);
 
-				api(url).then(function (data) {
+				apiSave(url).then(function (data) {
+					_sending = false;
+					if (submitBtn) submitBtn.disabled = false;
 					if (data && (data.ok || data.success || data.result === 'success')) {
 						api(APPS_SCRIPT_URL + '?page=1&perPage=' + PER_PAGE).then(renderUcapan);
 					}
